@@ -166,10 +166,13 @@ def build_signals(panel: dict, rep: pd.DataFrame, days: pd.DatetimeIndex) -> tup
 
 # --- book engine ---------------------------------------------------------------------
 
-def run_book(sets: dict, exec_day: dict, ret: pd.DataFrame, div_daily: pd.DataFrame | None) -> pd.DataFrame:
-    """Equal weight at each execution close, drifting in between. A held name that
-    stops being listed is sold at its last close (sell costs charged) and the
-    proceeds stay in cash until the next rebalance. Costs only on actual trades."""
+def run_book(sets: dict, exec_day: dict, ret: pd.DataFrame, div_daily: pd.DataFrame | None,
+             contrib: np.ndarray | None = None) -> pd.DataFrame:
+    """Equal weight at each execution close (or proportional to the given sizes when a
+    signal maps names to sizes), drifting in between. A held name that stops being
+    listed is sold at its last close (sell costs charged) and the proceeds stay in cash
+    until the next rebalance. Costs only on actual trades. `contrib`, if given, collects
+    each name's summed daily return contribution."""
     days, cols = ret.index, ret.columns
     R = ret.to_numpy()
     D = div_daily.reindex(index=days, columns=cols).fillna(0.0).to_numpy() if div_daily is not None else None
@@ -192,13 +195,19 @@ def run_book(sets: dict, exec_day: dict, ret: pd.DataFrame, div_daily: pd.DataFr
             rr = np.nan_to_num(r)
             dv = D[t] if D is not None else 0.0
             gross = float((w * (rr + dv)).sum())
+            if contrib is not None:
+                contrib += w * (rr + dv)
             w = w * (1.0 + rr + dv) / (1.0 + gross)
         else:
             gross = 0.0
         if day in execs:
-            names = [col_ix[n] for n in sets[execs[day]] if n in col_ix and not np.isnan(r[col_ix[n]])]
+            sig = sets[execs[day]]
+            names = [col_ix[n] for n in sig if n in col_ix and not np.isnan(r[col_ix[n]])]
             target = np.zeros(len(cols))
-            if names:
+            if names and isinstance(sig, dict):
+                size = np.array([sig[cols[i]] for i in names], dtype=float)
+                target[names] = size / size.sum()
+            elif names:
                 target[names] = 1.0 / len(names)
             diff = target - w
             buy, sell = diff.clip(min=0).sum(), (-diff).clip(min=0).sum()
