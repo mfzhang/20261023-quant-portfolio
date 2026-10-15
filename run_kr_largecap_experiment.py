@@ -145,7 +145,7 @@ def load(end: str | None) -> dict:
     days = krx_daily.trading_days(base.PRICE_START, end)
     if end is None:
         krx_daily.fetch_prices(days, verbose=False)
-    panel = krx_daily.load_panel(days)
+    panel = krx_daily.load_panel(days, base_end=base.cfg.END)
     per_year = pd.Series(days.year).value_counts().sort_index()
     ann = float(per_year.loc[days[0].year + 1: days[-1].year - 1].mean())
     sigs = base.signal_dates(days)

@@ -72,8 +72,10 @@ def trading_days(start: str, end: str | None = None) -> pd.DatetimeIndex:
 
 def benchmark_prices(start: str, end: str | None = None, ticker: str = "069500") -> pd.DataFrame:
     end_d = pd.Timestamp(end or pd.Timestamp.today()).strftime("%Y%m%d")
-    path = CACHE / f"etf_{ticker}_{pd.Timestamp(start):%Y%m%d}_{end_d}.csv"
-    if path.exists():
+    # open-ended requests share one file, refreshed once per calendar day
+    path = CACHE / f"etf_{ticker}_{pd.Timestamp(start):%Y%m%d}_{end_d if end else 'latest'}.csv"
+    fresh = end or (path.exists() and pd.Timestamp(path.stat().st_mtime, unit="s").date() == pd.Timestamp.today().date())
+    if path.exists() and fresh:
         return pd.read_csv(path, index_col=0, parse_dates=True)
     with _quiet():
         df = krx._stock().get_etf_ohlcv_by_date(pd.Timestamp(start).strftime("%Y%m%d"), end_d, ticker)
@@ -122,13 +124,10 @@ def fundamental_snapshot(day: pd.Timestamp) -> pd.DataFrame:
     return df
 
 
-def load_panel(days: pd.DatetimeIndex) -> dict[str, pd.DataFrame]:
-    """Wide (date x ticker) frames: close, ret, mcap, trdval, open, shares, plus
-    market / section / name of the latest appearance. A ticker absent on a day
-    was not listed (or not yet / no longer) that day."""
-    pkl = CACHE / f"panel_{days[0]:%Y%m%d}_{days[-1]:%Y%m%d}.pkl"
-    if pkl.exists():
-        return pd.read_pickle(pkl)
+RAW = ("close", "chg_pct", "open", "trdval", "mcap", "shares", "market", "section", "name")
+
+
+def _raw_frames(days: pd.DatetimeIndex) -> dict[str, pd.DataFrame]:
     frames = []
     for d in days:
         for m, label in MARKETS.items():
@@ -137,11 +136,40 @@ def load_panel(days: pd.DatetimeIndex) -> dict[str, pd.DataFrame]:
             frames.append(df)
     long = pd.concat(frames, ignore_index=True)
     long["section"] = long["section"].fillna("")
-    out = {c: long.pivot(index="date", columns="ticker", values=c).reindex(days)
-           for c in ("close", "chg_pct", "open", "trdval", "mcap", "shares")}
-    out["market"] = long.pivot(index="date", columns="ticker", values="market").reindex(days)
-    out["section"] = long.pivot(index="date", columns="ticker", values="section").reindex(days)
-    out["name"] = long.pivot(index="date", columns="ticker", values="name").reindex(days)
+    return {c: long.pivot(index="date", columns="ticker", values=c).reindex(days) for c in RAW}
+
+
+def load_panel(days: pd.DatetimeIndex, base_end: str | None = None) -> dict[str, pd.DataFrame]:
+    """Wide (date x ticker) frames: close, ret, mcap, trdval, open, shares, plus
+    market / section / name of the latest appearance. A ticker absent on a day
+    was not listed (or not yet / no longer) that day.
+
+    With `base_end` and sessions after it, the cached panel up to `base_end` is
+    extended by a small delta cache of the later sessions (appended incrementally)
+    instead of writing a new full panel per end date."""
+    pkl = CACHE / f"panel_{days[0]:%Y%m%d}_{days[-1]:%Y%m%d}.pkl"
+    if pkl.exists():
+        return pd.read_pickle(pkl)
+    if base_end is not None and days[-1] > pd.Timestamp(base_end):
+        base = load_panel(days[days <= pd.Timestamp(base_end)])
+        later = days[days > pd.Timestamp(base_end)]
+        delta_pkl = CACHE / f"panel_delta_{days[0]:%Y%m%d}_{pd.Timestamp(base_end):%Y%m%d}.pkl"
+        delta = pd.read_pickle(delta_pkl) if delta_pkl.exists() else None
+        have = delta["close"].index if delta is not None else pd.DatetimeIndex([])
+        if not have.equals(later[: len(have)]):
+            delta, have = None, pd.DatetimeIndex([])
+        if len(have) < len(later):
+            new = _raw_frames(later[len(have):])
+            delta = new if delta is None else {c: pd.concat([delta[c], new[c]]) for c in RAW}
+            pd.to_pickle(delta, delta_pkl)
+        raw = {c: pd.concat([base[c], delta[c].loc[later]]).reindex(days) for c in RAW}
+        return _derive(raw)
+    out = _derive(_raw_frames(days))
+    pd.to_pickle(out, pkl)
+    return out
+
+
+def _derive(out: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
     close = out["close"]
     simple = close / close.shift(1) - 1.0
     krx_ret = out["chg_pct"] / 100.0
@@ -161,5 +189,4 @@ def load_panel(days: pd.DatetimeIndex) -> dict[str, pd.DataFrame]:
     out["n_broken_base"] = int(broken.sum().sum())
     ret[close.shift(1).isna() & close.notna()] = np.nan  # first listed day
     out["ret"] = ret
-    pd.to_pickle(out, pkl)
     return out
