@@ -93,8 +93,9 @@ def signal_dates(days: pd.DatetimeIndex) -> list[pd.Timestamp]:
     return [d for d in ends if d < days[-1]]
 
 
-def build_signals(panel: dict, rep: pd.DataFrame, days: pd.DatetimeIndex) -> tuple[dict, pd.DataFrame, pd.DataFrame]:
-    sigs = signal_dates(days)
+def build_signals(panel: dict, rep: pd.DataFrame, days: pd.DatetimeIndex,
+                  sigs: list[pd.Timestamp] | None = None) -> tuple[dict, pd.DataFrame, pd.DataFrame]:
+    sigs = signal_dates(days) if sigs is None else sigs
     books: dict[str, dict] = {k: {} for k in
                               [f"H1 Q{i}" for i in range(1, 6)] + [f"H2 Q{i}" for i in range(1, 6)] + ["H3", "eligible EW"]}
     counts, metrics_rows = [], []
